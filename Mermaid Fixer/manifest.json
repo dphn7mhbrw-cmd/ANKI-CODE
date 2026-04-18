@@ -1,0 +1,7 @@
+{
+    "name": "Obsidian Mermaid → Anki Converter",
+    "version": "1.0.0",
+    "description": "Converts Obsidian-style multi-line Mermaid diagrams (with or without ``` fences) into the single-line [mermaid]…[/mermaid] format that Anki expects, preserving all {{cN::…}} cloze deletions and style directives.",
+    "author": "Custom",
+    "min_point_version": 231000
+}
