@@ -1,0 +1,71 @@
+.card {
+  font-family: arial;
+  font-size: 20px;
+  text-align: center;
+  color: black;
+  background-color: white;
+}
+.cloze {
+  font-weight: bold;
+  color: blue;
+  fill: blue; /* CRITICAL: Allows clozes to be colored inside SVG diagrams */
+}
+.nightMode .cloze {
+  color: lightblue;
+  fill: lightblue; /* CRITICAL: Allows clozes to be colored inside SVG diagrams */
+}
+.cloze, .cloze * { 
+  visibility: visible !important; 
+  opacity: 1 !important; 
+  filter: none !important; 
+}
+.cloze img { 
+  display: inline !important; 
+  max-width: 100% !important; 
+}
+
+/* Prevent mermaid SVG nodes from clipping injected cloze text */
+.mermaid-block svg .label {
+  overflow: visible !important;
+}
+.mermaid-block svg foreignObject {
+  overflow: visible !important;
+}
+.mermaid-block svg .node rect,
+.mermaid-block svg .node circle,
+.mermaid-block svg .node ellipse,
+.mermaid-block svg .node polygon {
+  overflow: visible !important;
+}
+.mermaid-block svg text,
+.mermaid-block svg tspan {
+  overflow: visible !important;
+}
+.mermaid-block svg {
+  overflow: visible !important;
+}
+/* Edge label clip fix */
+.mermaid-block svg .edgeLabel {
+  overflow: visible !important;
+}
+.mermaid-block svg .edgeLabel rect {
+  overflow: visible !important;
+}
+.mermaid-block svg .edgeLabel foreignObject {
+  overflow: visible !important;
+}
+.mermaid-block svg .edgeLabel span,
+.mermaid-block svg .edgeLabel p {
+  overflow: visible !important;
+  white-space: nowrap !important;
+}
+.mermaid-block svg g.edgeLabels {
+  overflow: visible !important;
+}
+.mermaid-block svg .edgeLabel rect {
+  x: -8px !important;
+  width: calc(100% + 16px) !important;
+}
+.error-icon, .error-text, [id^="mermaid"] .error-icon, [id^="mermaid"] .error-text {
+  display: none !important;
+}
