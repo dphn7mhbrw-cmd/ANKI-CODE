@@ -1,0 +1,388 @@
+<div id="cloze-original" hidden="">{{Text}}</div>
+<div id="cloze-anki-rendered" hidden="">{{cloze:Text}}</div>
+<div id="cloze-js-rendered"></div>
+<script>
+(function () {
+  'use strict';
+  var MERMAID_CDN = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+  /* ── utilities ──────────────────────────────────────── */
+  function escRE(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function decodeHtml(html) {
+    var t = document.createElement('textarea');
+    t.innerHTML = html; return t.value;
+  }
+  function stripTags(html) { return html.replace(/<[^>]+>/g, ''); }
+  /* ── mermaid loader ─────────────────────────────────── */
+  function loadMermaid(cb) {
+    if (window.mermaid) { cb(); return; }
+    var s = document.createElement('script');
+    s.src = MERMAID_CDN;
+    s.onload = cb;
+    s.onerror = function () { console.warn('[mermaid] CDN failed'); };
+    document.head.appendChild(s);
+  }
+  var alreadyRendered = false;
+  function render() {
+    if (alreadyRendered) return;
+    var divOriginal   = document.getElementById('cloze-original');
+    var divJsRendered = document.getElementById('cloze-js-rendered');
+    if (!divOriginal || !divJsRendered) return;
+    var currentCloze = +(
+      (document.body.className.match(/(^|\s)card(\d+)(\s|$)/) || [])[2] ||
+      ((document.getElementById('qa_box') &&
+        document.getElementById('qa_box').className.match(/(^|\s)card(\d+)(\s|$)/)) || [])[2] ||
+      0
+    );
+    var rawHtml = divOriginal.innerHTML;
+    rawHtml = rawHtml
+      .replace(/&#123;/g, '{').replace(/&#125;/g, '}')
+      .replace(/&lbrace;/g, '{').replace(/&rbrace;/g, '}');
+    var isBack = !!document.getElementById('cloze-is-back');
+    var nightMode = document.body.classList.contains('nightMode') ||
+                    document.body.classList.contains('night_mode');
+    var clozeColor = nightMode ? 'lightblue' : 'blue';
+    /* ── parse all clozes ── */
+    var allClozes = {};
+    var clozeMatches = rawHtml.match(/\{\{c\d+::[\s\S]*?\}\}/g) || [];
+    for (var i = 0; i < clozeMatches.length; i++) {
+      var cm = clozeMatches[i].match(/\{\{c(\d+)::([\s\S]*?)(::([\s\S]*?))?\}\}/);
+      if (!cm) continue;
+      var cidx = +cm[1];
+      allClozes[cidx] = allClozes[cidx] || { askAll: false, clozes: {} };
+      if (cm[2] === 'ask-all') allClozes[cidx].askAll = true;
+      allClozes[cidx].clozes[clozeMatches[i]] = {
+        content:     cm[2],
+        placeholder: cm[4] || '...'
+      };
+    }
+    /* ── extract mermaid blocks ── */
+    var mermaidBlocks = [];
+    var patterns = [
+      /<pre[^>]*>\s*<code[^>]*class="[^"]*(?:language-mermaid|mermaid)[^"]*"[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi,
+      /<code[^>]*class="[^"]*(?:language-mermaid|mermaid)[^"]*"[^>]*>([\s\S]*?)<\/code>/gi,
+      /<pre[^>]*class="[^"]*mermaid[^"]*"[^>]*>([\s\S]*?)<\/pre>/gi,
+      /\[mermaid\]([\s\S]*?)\[\/mermaid\]/gi,
+      /```\s*mermaid\s*([\s\S]*?)```/gi
+    ];
+    for (var pi = 0; pi < patterns.length; pi++) {
+      rawHtml = rawHtml.replace(patterns[pi], function (_, code) {
+        var idx = mermaidBlocks.length;
+        var clean = code
+          .replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<\/div>/gi, '\n').replace(/<div[^>]*>/gi, '\n')
+          .replace(/<\/p>/gi, '\n').replace(/<p[^>]*>/gi, '')
+          .replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ')
+          .replace(/\n{3,}/g, '\n\n').trim();
+        mermaidBlocks.push({ rawCode: clean, clozeList: [] });
+        return 'MMBLOCK' + idx + 'MMEND';
+      });
+    }
+    /* ── cloze substitution for normal HTML ── */
+    var question = rawHtml;
+    for (var qidx in allClozes) {
+      for (var orig in allClozes[qidx].clozes) {
+        var rep    = '';
+        var mark   = false;
+        var needle = new RegExp(escRE(orig), 'g');
+        if (allClozes[qidx].askAll) {
+          rep = '';
+        } else if (
+          (currentCloze <= qidx && qidx < currentCloze + 1) ||
+          (allClozes[currentCloze] && allClozes[currentCloze].askAll)
+        ) {
+          mark = true;
+          rep  = isBack ? allClozes[qidx].clozes[orig].content
+                        : '[' + allClozes[qidx].clozes[orig].placeholder + ']';
+        } else if (qidx < currentCloze) {
+          rep = allClozes[qidx].clozes[orig].content;
+        } else {
+          rep    = '';
+          needle = new RegExp(escRE(orig) + '(<br>|[\\s,.])*', 'g');
+        }
+        question = question.replace(needle, function () {
+          return (mark ? '<span class="cloze">' : '') + rep + (mark ? '</span>' : '');
+        });
+      }
+    }
+    question = question.replace(/~=\{([^}]+)\}([\s\S]*?)=~/g,
+      '<span style="color:$1">$2</span>');
+    /* ════════════════════════════════════════════════════
+       STEP 3 — prepare mermaid blocks.
+
+       NODE-CENTRIC approach: process each Mermaid node label
+       as a whole unit rather than one cloze token at a time.
+       This correctly handles nodes that contain multiple cloze
+       tokens in a single label, e.g.:
+         A["first cloze value second cloze value"]
+
+       For each node label we:
+         1. Find all cloze tokens within it
+         2. Build a content label (all tokens → real text) for
+            Mermaid to render with correct node sizing
+         3. Build a visual HTML string (tokens → styled spans
+            or plain text) for post-render injection
+         4. Store { nodeId, content, visualHtml } in clozeList
+
+       In DOM post-processing we look up each node by its
+       Mermaid node ID (e.g. flowchart-A-N) so replacement is
+       exact regardless of duplicate or substring text.
+       ════════════════════════════════════════════════════ */
+
+    /* Helper: given a raw label string, compute contentLabel and visualHtml */
+    function processLabel(label) {
+      var tokens = [];
+      var re = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
+      var m;
+      while ((m = re.exec(label)) !== null) {
+        var _cidx        = +m[1];
+        var _cContent    = decodeHtml(stripTags(m[2]));
+        var _cPlaceholder = m[3] || '...';
+        var _isAskAll    = allClozes[_cidx] && allClozes[_cidx].askAll;
+        var _isCurr      = (_isAskAll && allClozes[currentCloze] && allClozes[currentCloze].askAll) ||
+                           (!_isAskAll && currentCloze <= _cidx && _cidx < currentCloze + 1) ||
+                           (allClozes[currentCloze] && allClozes[currentCloze].askAll);
+        var _visual;
+        if (_isAskAll) {
+          _visual = _cPlaceholder;
+        } else if (_isCurr) {
+          _visual = isBack ? _cContent : ('[' + _cPlaceholder + ']');
+        } else if (_cidx < currentCloze) {
+          _visual = _cContent;
+        } else {
+          _visual = '[' + _cPlaceholder + ']';
+        }
+        tokens.push({
+          start:   m.index,
+          end:     m.index + m[0].length,
+          content: _cContent,
+          visual:  _visual,
+          styled:  _isCurr && !_isAskAll
+        });
+      }
+      if (!tokens.length) return null;
+
+      /* content label: replace every cloze token with its real text */
+      var contentLabel = label;
+      tokens.forEach(function (t) {
+        contentLabel = contentLabel.replace(t.original || label.slice(t.start, t.end), t.content);
+        /* use positional replace to be safe with duplicates */
+      });
+      /* rebuild contentLabel cleanly using positions */
+      contentLabel = '';
+      var pos = 0;
+      tokens.forEach(function (t) {
+        contentLabel += label.slice(pos, t.start) + t.content;
+        pos = t.end;
+      });
+      contentLabel += label.slice(pos);
+
+      /* visual HTML: cloze tokens → styled spans, static text → escaped
+         \n → <br> so multi-line labels keep their line breaks after injection */
+      var visualHtml = '';
+      pos = 0;
+      var hasStyling = false;
+      tokens.forEach(function (t) {
+        visualHtml += escHtml(label.slice(pos, t.start)).replace(/\n/g, '<br>');
+        if (t.styled) {
+          hasStyling = true;
+          visualHtml += '<span class="cloze" style="color:' + clozeColor +
+                        ' !important;font-weight:bold !important">' +
+                        escHtml(t.visual) + '</span>';
+        } else {
+          visualHtml += escHtml(t.visual);
+        }
+        pos = t.end;
+      });
+      visualHtml += escHtml(label.slice(pos)).replace(/\n/g, '<br>');
+
+      return { contentLabel: contentLabel, visualHtml: visualHtml, styled: hasStyling };
+    }
+
+    for (var bi = 0; bi < mermaidBlocks.length; bi++) {
+      var block = mermaidBlocks[bi];
+      var code  = block.rawCode;
+
+      /* ── Replace node labels that contain cloze syntax ──
+         Handles:  A["label"]   and   A(["label"])
+         nodeId is captured so we can target the SVG element
+         directly after Mermaid renders.                    */
+
+      /* Pattern 1: ID["label"] */
+      code = code.replace(/\b([A-Za-z_]\w*)\s*\["([\s\S]*?)"\]/g,
+        function (fullMatch, nodeId, label) {
+          if (label.indexOf('{{c') === -1) return fullMatch;
+          var result = processLabel(label);
+          if (!result) return fullMatch;
+          block.clozeList.push({
+            nodeId:     nodeId,
+            content:    result.contentLabel,
+            visualHtml: result.visualHtml,
+            styled:     result.styled
+          });
+          return nodeId + '["' + result.contentLabel + '"]';
+        }
+      );
+
+      /* Pattern 2: ID(["label"]) — stadium / rounded nodes */
+      code = code.replace(/\b([A-Za-z_]\w*)\s*\(\["([\s\S]*?)"\]\)/g,
+        function (fullMatch, nodeId, label) {
+          if (label.indexOf('{{c') === -1) return fullMatch;
+          var result = processLabel(label);
+          if (!result) return fullMatch;
+          block.clozeList.push({
+            nodeId:     nodeId,
+            content:    result.contentLabel,
+            visualHtml: result.visualHtml,
+            styled:     result.styled
+          });
+          return nodeId + '(["' + result.contentLabel + '"])';
+        }
+      );
+
+      block.cleanCode = decodeHtml(stripTags(code)).trim();
+      question = question.replace(
+        'MMBLOCK' + bi + 'MMEND',
+        '<div class="mermaid-block" id="mermaid-target-' + bi + '">' +
+          '<span style="opacity:.4;font-size:12px">Loading diagram…</span></div>'
+      );
+    }
+    divJsRendered.innerHTML = question;
+    alreadyRendered = true;
+    if (mermaidBlocks.length > 0) renderMermaidBlocks(mermaidBlocks);
+  }
+  /* ── mermaid renderer ── */
+  async function renderMermaidBlocks(blocks) {
+    loadMermaid(async function () {
+      var night = document.body.classList.contains('nightMode') ||
+                  document.body.classList.contains('night_mode');
+      mermaid.initialize({
+        startOnLoad: false, theme: night ? 'dark' : 'default',
+        securityLevel: 'loose', logLevel: 'fatal'
+      });
+      for (var i = 0; i < blocks.length; i++) {
+        var block = blocks[i];
+        var el    = document.getElementById('mermaid-target-' + i);
+        if (!el) continue;
+        try {
+          var uid    = 'mm' + i + Math.random().toString(36).slice(2, 9);
+          var result = await mermaid.render(uid, block.cleanCode);
+          el.innerHTML = result.svg;
+          var svgEl = el.querySelector('svg');
+          if (!svgEl) continue;
+
+          /* ── DOM replacement ────────────────────────────────────
+             For each cloze node, find its SVG element by Mermaid's
+             node ID (e.g. [id^="flowchart-A-"]) and replace the
+             label innerHTML. This is exact and immune to duplicate
+             or substring text collisions.
+             ──────────────────────────────────────────────────────── */
+          block.clozeList.forEach(function (item) {
+            /* Primary: find by Mermaid node ID attribute */
+            var nodeEl = svgEl.querySelector(
+              '[id^="flowchart-' + item.nodeId + '-"],' +
+              '[id="flowchart-' + item.nodeId + '"]'
+            );
+            var labelEl = nodeEl
+              ? (nodeEl.querySelector('.nodeLabel') || nodeEl.querySelector('.label'))
+              : null;
+
+            if (labelEl) {
+              labelEl.innerHTML = item.visualHtml;
+              return;
+            }
+
+            /* Fallback: exact textContent match (handles edge cases) */
+            var allLabels = svgEl.querySelectorAll('.nodeLabel, .label span, .label p');
+            for (var j = 0; j < allLabels.length; j++) {
+              if (allLabels[j].textContent.trim() === item.content) {
+                allLabels[j].innerHTML = item.visualHtml;
+                break;
+              }
+            }
+          });
+
+          /* Ensure SVG never clips */
+          svgEl.style.overflow = 'visible';
+          if (svgEl.parentElement) svgEl.parentElement.style.overflow = 'visible';
+        } catch (err) {
+          el.innerHTML =
+            '<pre style="text-align:left;background:#fee2e2;color:#7f1d1d;' +
+            'padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap">' +
+            'Diagram error: ' + escHtml(err.message || err) +
+            '\n\nCode sent to mermaid:\n' + escHtml(block.cleanCode) + '</pre>';
+        }
+      }
+    });
+  }
+  /* ── trigger ── */
+  function delayedRender() {
+    if (window.requestAnimationFrame) window.requestAnimationFrame(render);
+    else setTimeout(render, 0);
+  }
+  window.onload = delayedRender;
+  if (document.readyState === 'complete') delayedRender();
+  else document.addEventListener('DOMContentLoaded', delayedRender);
+  new MutationObserver(function (muts) {
+    muts.forEach(function (m) {
+      if (m.type === 'attributes' && m.attributeName === 'class') delayedRender();
+    });
+  }).observe(document.body, { attributes: true });
+})();
+</script>
+<!-- ── table wrapper + cleanup ── -->
+<script>
+(function () {
+  function wrapTables(root) {
+    if (!root) return;
+    root.querySelectorAll('table').forEach(function (t) {
+      if (t.closest('.content-scroll')) return;
+      var w = document.createElement('div');
+      w.className = 'content-scroll';
+      t.parentNode.insertBefore(w, t);
+      w.appendChild(t);
+    });
+  }
+  function removeEmptyItems(root) {
+    if (!root) return;
+    root.querySelectorAll('li, p').forEach(function (n) {
+      if (n.textContent.replace(/[\s\u200b]/g, '') === '') n.remove();
+    });
+  }
+  function runFixes() {
+    var root = document.getElementById('cloze-js-rendered') || document.body;
+    wrapTables(root); removeEmptyItems(root);
+  }
+  if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(runFixes, 0);
+  else document.addEventListener('DOMContentLoaded', runFixes);
+  if (window.MutationObserver) {
+    new MutationObserver(runFixes).observe(
+      document.getElementById('cloze-js-rendered') || document.body,
+      { childList: true, subtree: true });
+  }
+})();
+</script>
+<!-- ── fallback ── -->
+<script>
+(function () {
+  function isEmpty(el) {
+    return !el || !el.innerHTML || el.innerHTML.replace(/[\s\u200b]/g, '') === '';
+  }
+  function fallback() {
+    var js   = document.getElementById('cloze-js-rendered');
+    var anki = document.getElementById('cloze-anki-rendered');
+    var orig = document.getElementById('cloze-original');
+    if (js && isEmpty(js)) {
+      if (anki && !isEmpty(anki)) js.innerHTML = anki.innerHTML;
+      else if (orig && !isEmpty(orig)) js.innerHTML = orig.innerHTML;
+    }
+  }
+  if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(fallback, 0);
+  else document.addEventListener('DOMContentLoaded', fallback);
+  if (window.MutationObserver) {
+    new MutationObserver(fallback).observe(document.body, { childList: true, subtree: true });
+  }
+})();
+</script>
